@@ -624,9 +624,34 @@ def deduplicate_all_accounts(accounts, progress_window=None):
                 except Exception as e:
                     logging.warning(f"Error removing duplicate {filepath}: {e}")
     
+    # Remove empty folders after deduplication
+    empty_folders_removed = 0
+    for account in accounts:
+        account_email = account["email"]
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
+        
+        if not os.path.exists(acc_dir):
+            continue
+        
+        # Walk bottom-up to remove empty folders
+        for root, dirs, files in os.walk(acc_dir, topdown=False):
+            for dir_name in dirs:
+                dir_path = os.path.join(root, dir_name)
+                try:
+                    # Check if directory is empty (no files, no subdirectories)
+                    if not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+                        empty_folders_removed += 1
+                        logging.info(f"Removed empty folder: {dir_path}")
+                except Exception as e:
+                    logging.warning(f"Error removing empty folder {dir_path}: {e}")
+    
     # Log results
     space_freed_mb = space_freed / (1024 * 1024)
     msg = f"Deduplication complete: {duplicates_removed} duplicates removed, {space_freed_mb:.2f} MB freed"
+    if empty_folders_removed > 0:
+        msg += f", {empty_folders_removed} empty folders removed"
     logging.info(msg)
     if progress_window:
         progress_window.log(f"✓ {msg}", "SUCCESS")
