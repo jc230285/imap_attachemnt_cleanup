@@ -21,7 +21,6 @@ import traceback
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ATTACHMENTS_ROOT = os.path.join(BASE_DIR, "attachments")  # Fallback if not specified in config
 STATE_FILE = os.path.join(BASE_DIR, "state.json")
-DOWNLOADED_CSV = os.path.join(BASE_DIR, "downloaded.csv")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 FAILURE_LOG = os.path.join(BASE_DIR, "failures.json")
@@ -305,18 +304,33 @@ def save_hash_index_atomic(hash_set, idx_path, lock):
         with open(idx_path, "w") as f:
             json.dump(list(combined), f)
 
-def load_downloaded_db():
+def get_account_csv_path(account_email: str, attachments_root: str = None) -> str:
+    """Get the CSV path for a specific account"""
+    if attachments_root is None:
+        attachments_root = DEFAULT_ATTACHMENTS_ROOT
+    acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
+    return os.path.join(acc_dir, "downloaded.csv")
+
+def load_downloaded_db(accounts):
+    """Load downloaded database from all account CSV files"""
     db = {}
-    if not os.path.exists(DOWNLOADED_CSV):
-        return db
-    with open(DOWNLOADED_CSV, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            key = (row["account_email"], row["uid"])
-            db[key] = row
+    for account in accounts:
+        account_email = account["email"]
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        csv_path = get_account_csv_path(account_email, attachments_root)
+        
+        if not os.path.exists(csv_path):
+            continue
+            
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                key = (row["account_email"], row["uid"])
+                db[key] = row
     return db
 
-def save_downloaded_db(db):
+def save_downloaded_db(db, accounts):
+    """Save downloaded database to per-account CSV files"""
     fieldnames = [
         "account_email",
         "uid",
@@ -327,11 +341,31 @@ def save_downloaded_db(db):
         "attachments_deleted",
         "attachment_filenames"
     ]
-    with open(DOWNLOADED_CSV, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in db.values():
-            writer.writerow(row)
+    
+    # Group entries by account
+    account_data = {}
+    for (acc_email, uid), row in db.items():
+        if acc_email not in account_data:
+            account_data[acc_email] = []
+        account_data[acc_email].append(row)
+    
+    # Save each account's data to its own CSV
+    for account in accounts:
+        account_email = account["email"]
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        csv_path = get_account_csv_path(account_email, attachments_root)
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        
+        # Get data for this account
+        rows = account_data.get(account_email, [])
+        
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
 
 def calculate_age_days(sent_dt: datetime) -> int:
     now = datetime.now(timezone.utc)
@@ -362,6 +396,9 @@ def select_all_mail(imap):
 hash_index_lock = threading.Lock()
 state_lock = threading.Lock()
 db_lock = threading.Lock()
+
+# Global variable to store accounts for auto-save
+GLOBAL_ACCOUNTS = []
 
 def process_new_emails_for_account(account, state, downloaded_db, progress_window=None, failures=None):
     account_email = account["email"]
@@ -578,7 +615,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         with state_lock:
             save_state(state)
         with db_lock:
-            save_downloaded_db(downloaded_db)
+            save_downloaded_db(downloaded_db, GLOBAL_ACCOUNTS)
         save_failures(failures)
         
         if progress_window:
@@ -726,6 +763,21 @@ def delete_old_attachments_for_account(account, state, downloaded_db, progress_w
 
 # ---------- MAIN ----------
 
+def auto_save_timer(state, downloaded_db, failures, stop_event):
+    """Auto-save state and database every 60 seconds"""
+    while not stop_event.is_set():
+        stop_event.wait(60)  # Wait 60 seconds or until stopped
+        if not stop_event.is_set():
+            try:
+                with state_lock:
+                    save_state(state)
+                with db_lock:
+                    save_downloaded_db(downloaded_db, GLOBAL_ACCOUNTS)
+                save_failures(failures)
+                logging.info("Auto-saved state and database")
+            except Exception as e:
+                logging.error(f"Auto-save failed: {str(e)}")
+
 def process_account_wrapper(account, state, downloaded_db, progress_window, failures):
     """Wrapper for concurrent processing"""
     result = process_new_emails_for_account(account, state, downloaded_db, progress_window, failures)
@@ -746,7 +798,6 @@ def main():
             
             config = load_config()
             state = load_state()
-            downloaded_db = load_downloaded_db()
             failures = load_failures()
 
             accounts = config.get("accounts", [])
@@ -754,6 +805,12 @@ def main():
                 progress_window.log("No accounts configured in config.json", "ERROR")
                 progress_window.update_progress(100, "Error: No accounts configured")
                 return
+            
+            # Set global accounts for auto-save
+            global GLOBAL_ACCOUNTS
+            GLOBAL_ACCOUNTS = accounts
+            
+            downloaded_db = load_downloaded_db(accounts)
 
             # Display last run information
             progress_window.log("\n--- Previous Run Information ---")
@@ -782,6 +839,16 @@ def main():
                         progress_window.log(f"    ✗ Last failure: {last_failure} - {last_error}", "ERROR")
             
             progress_window.log("--- End Previous Run Information ---\n")
+            
+            # Start auto-save timer
+            stop_auto_save = threading.Event()
+            auto_save_thread = threading.Thread(
+                target=auto_save_timer,
+                args=(state, downloaded_db, failures, stop_auto_save),
+                daemon=True
+            )
+            auto_save_thread.start()
+            progress_window.log("Auto-save enabled (every 60 seconds)\n")
 
             progress_window.set_total_accounts(len(accounts))
             progress_window.log(f"Found {len(accounts)} account(s) to process")
@@ -831,7 +898,7 @@ def main():
             # Save state and failures after downloads
             progress_window.update_progress(55, "Saving state...")
             save_state(state)
-            save_downloaded_db(downloaded_db)
+            save_downloaded_db(downloaded_db, accounts)
             save_failures(failures)
 
             # Task 2: Deletion (sequential to avoid conflicts)
@@ -853,8 +920,11 @@ def main():
             # Final save
             progress_window.update_progress(95, "Finalizing...")
             save_state(state)
-            save_downloaded_db(downloaded_db)
+            save_downloaded_db(downloaded_db, accounts)
             save_failures(failures)
+            
+            # Stop auto-save timer
+            stop_auto_save.set()
 
             # Summary
             progress_window.update_progress(100, "Completed!")
