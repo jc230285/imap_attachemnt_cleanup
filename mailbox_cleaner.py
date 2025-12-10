@@ -984,7 +984,8 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 if progress_window:
                     progress_window.increment_attachments()
 
-            if any_attachments:
+            # Only track emails that actually had attachments downloaded (not duplicates)
+            if any_downloaded:
                 key = (account_email, uid_str)
                 entry = downloaded_db.get(key, {
                     "account_email": account_email,
@@ -992,13 +993,10 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                     "message_id": msg.get("Message-ID", ""),
                     "sent_date": sent_date_iso,
                     "subject": subject,
-                    "attachments_downloaded": "0",
+                    "attachments_downloaded": "1",
                     "attachments_deleted": "0",
                     "attachment_filenames": ""
                 })
-
-                if any_downloaded:
-                    entry["attachments_downloaded"] = "1"
 
                 existing_files = [x for x in entry["attachment_filenames"].split(";") if x]
                 existing_files.extend(attachment_filenames)
