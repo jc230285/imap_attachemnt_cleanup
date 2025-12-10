@@ -7,6 +7,17 @@ config.json
 # CSV files
 *.csv
 
+# JSON data files
+state.json
+failures.json
+
+# Backup files
+*_backup.py
+*_enhanced.py
+
+# Attachments directory
+attachments/
+
 # Python cache
 __pycache__/
 *.py[cod]
