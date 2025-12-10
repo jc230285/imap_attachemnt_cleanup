@@ -18,6 +18,9 @@ failures.json
 # Attachments directory
 attachments/
 
+# Logs directory
+logs/
+
 # Utility scripts folder
 scripts/
 

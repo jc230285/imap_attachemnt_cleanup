@@ -16,6 +16,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import traceback
 
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    logging.warning("PIL/Pillow not available - small image cleanup will be skipped")
+
 # ---------- CONFIG / PATHS ----------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -624,6 +631,48 @@ def deduplicate_all_accounts(accounts, progress_window=None):
                 except Exception as e:
                     logging.warning(f"Error removing duplicate {filepath}: {e}")
     
+    # Remove small images (under 32x32 pixels)
+    small_images_removed = 0
+    small_images_space_freed = 0
+    
+    if PIL_AVAILABLE:
+        if progress_window:
+            progress_window.log("  Checking for small images (< 32x32)...")
+        
+        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.ico', '.tiff', '.tif'}
+        
+        for account in accounts:
+            account_email = account["email"]
+            attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+            acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
+            
+            if not os.path.exists(acc_dir):
+                continue
+            
+            for root, dirs, files in os.walk(acc_dir):
+                for filename in files:
+                    if filename in ['.hashes.json', 'downloaded.csv']:
+                        continue
+                    
+                    filepath = os.path.join(root, filename)
+                    file_ext = os.path.splitext(filename)[1].lower()
+                    
+                    if file_ext in image_extensions:
+                        try:
+                            with Image.open(filepath) as img:
+                                width, height = img.size
+                                
+                                # Remove if both dimensions are under 32 pixels
+                                if width < 32 and height < 32:
+                                    file_size = os.path.getsize(filepath)
+                                    os.remove(filepath)
+                                    small_images_removed += 1
+                                    small_images_space_freed += file_size
+                                    logging.info(f"Removed small image ({width}x{height}): {filepath}")
+                        except Exception as e:
+                            # Not a valid image or can't be opened
+                            logging.debug(f"Could not check image {filepath}: {e}")
+    
     # Remove empty folders after deduplication
     empty_folders_removed = 0
     for account in accounts:
@@ -649,7 +698,11 @@ def deduplicate_all_accounts(accounts, progress_window=None):
     
     # Log results
     space_freed_mb = space_freed / (1024 * 1024)
+    small_images_mb = small_images_space_freed / (1024 * 1024)
+    
     msg = f"Deduplication complete: {duplicates_removed} duplicates removed, {space_freed_mb:.2f} MB freed"
+    if small_images_removed > 0:
+        msg += f", {small_images_removed} small images removed ({small_images_mb:.2f} MB)"
     if empty_folders_removed > 0:
         msg += f", {empty_folders_removed} empty folders removed"
     logging.info(msg)
