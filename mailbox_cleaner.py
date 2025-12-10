@@ -41,12 +41,12 @@ class ProgressWindow:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("IMAP Mailbox Cleaner - Progress")
-        self.root.geometry("900x650")
+        self.root.geometry("1000x700")
         
         # Progress bar
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(
-            self.root, variable=self.progress_var, maximum=100, length=880
+            self.root, variable=self.progress_var, maximum=100, length=980
         )
         self.progress_bar.pack(pady=10, padx=10)
         
@@ -61,6 +61,33 @@ class ProgressWindow:
         self.stats_label = tk.Label(stats_frame, text="Accounts: 0/0 | Messages: 0 | Attachments: 0", 
                                      font=("Arial", 9))
         self.stats_label.pack()
+        
+        # Status info frame - shows last run info and current processing
+        info_frame = tk.Frame(self.root, bg="#e8f4f8", relief=tk.RIDGE, borderwidth=2)
+        info_frame.pack(pady=5, padx=10, fill=tk.X)
+        
+        # Current processing info
+        current_frame = tk.Frame(info_frame, bg="#e8f4f8")
+        current_frame.pack(side=tk.LEFT, padx=10, pady=5)
+        tk.Label(current_frame, text="Current Processing:", font=("Arial", 9, "bold"), bg="#e8f4f8").pack(anchor=tk.W)
+        self.current_account_label = tk.Label(current_frame, text="Account: None", font=("Arial", 8), bg="#e8f4f8")
+        self.current_account_label.pack(anchor=tk.W)
+        self.current_date_label = tk.Label(current_frame, text="Email Date: None", font=("Arial", 8), bg="#e8f4f8")
+        self.current_date_label.pack(anchor=tk.W)
+        
+        # Last successful info
+        success_frame = tk.Frame(info_frame, bg="#e8f4f8")
+        success_frame.pack(side=tk.LEFT, padx=20, pady=5)
+        tk.Label(success_frame, text="Last Successful:", font=("Arial", 9, "bold"), bg="#e8f4f8", fg="green").pack(anchor=tk.W)
+        self.last_success_label = tk.Label(success_frame, text="None", font=("Arial", 8), bg="#e8f4f8")
+        self.last_success_label.pack(anchor=tk.W)
+        
+        # Last failure info
+        failure_frame = tk.Frame(info_frame, bg="#e8f4f8")
+        failure_frame.pack(side=tk.LEFT, padx=20, pady=5)
+        tk.Label(failure_frame, text="Last Failed:", font=("Arial", 9, "bold"), bg="#e8f4f8", fg="red").pack(anchor=tk.W)
+        self.last_failure_label = tk.Label(failure_frame, text="None", font=("Arial", 8), bg="#e8f4f8")
+        self.last_failure_label.pack(anchor=tk.W)
         
         # Log area
         log_frame = tk.Frame(self.root)
@@ -102,6 +129,25 @@ class ProgressWindow:
                      f"Messages: {self.messages_processed} | "
                      f"Attachments: {self.attachments_saved}"
             )
+        self.root.after(0, _update)
+    
+    def update_current_processing(self, account, email_date=None):
+        def _update():
+            self.current_account_label.config(text=f"Account: {account}")
+            if email_date:
+                self.current_date_label.config(text=f"Email Date: {email_date}")
+            else:
+                self.current_date_label.config(text="Email Date: None")
+        self.root.after(0, _update)
+    
+    def update_last_successful(self, account, date_str):
+        def _update():
+            self.last_success_label.config(text=f"{account}\n{date_str}")
+        self.root.after(0, _update)
+    
+    def update_last_failed(self, account, date_str, error):
+        def _update():
+            self.last_failure_label.config(text=f"{account}\n{date_str}\n{error[:50]}")
         self.root.after(0, _update)
         
     def update_progress(self, value, status=""):
@@ -379,6 +425,10 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
 
             sent_dt = parse_email_date(msg.get("Date"))
             sent_date_iso = sent_dt.astimezone(timezone.utc).isoformat()
+            
+            # Update GUI with current processing info
+            if progress_window:
+                progress_window.update_current_processing(account_email, sent_date_iso)
 
             from_email = parseaddr(msg.get("From", ""))[1] or "unknown"
             to_email = parseaddr(msg.get("To", ""))[1] or "unknown"
@@ -665,6 +715,34 @@ def main():
                 progress_window.log("No accounts configured in config.json", "ERROR")
                 progress_window.update_progress(100, "Error: No accounts configured")
                 return
+
+            # Display last run information
+            progress_window.log("\n--- Previous Run Information ---")
+            for account in accounts:
+                email = account["email"]
+                
+                # Show last processed state
+                if email in state:
+                    last_uid = state[email].get("last_processed_uid", "None")
+                    last_date = state[email].get("last_processed_date", "None")
+                    progress_window.log(f"  {email}: Last UID={last_uid}, Date={last_date}")
+                else:
+                    progress_window.log(f"  {email}: No previous state (first run)")
+                
+                # Show failure info if exists
+                if email in failures:
+                    last_success = failures[email].get("last_success")
+                    last_failure = failures[email].get("last_failure")
+                    last_error = failures[email].get("last_error")
+                    
+                    if last_success:
+                        progress_window.update_last_successful(email, last_success)
+                        progress_window.log(f"    ✓ Last success: {last_success}", "SUCCESS")
+                    if last_failure and last_error:
+                        progress_window.update_last_failed(email, last_failure, last_error)
+                        progress_window.log(f"    ✗ Last failure: {last_failure} - {last_error}", "ERROR")
+            
+            progress_window.log("--- End Previous Run Information ---\n")
 
             progress_window.set_total_accounts(len(accounts))
             progress_window.log(f"Found {len(accounts)} account(s) to process")
