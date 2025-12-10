@@ -15,6 +15,8 @@ from email.utils import parsedate_to_datetime, parseaddr
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import traceback
+import time
+import socket
 
 try:
     from PIL import Image
@@ -795,16 +797,6 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
     account_email = account["email"]
     imap = None
     
-    # Check if this account has failed before
-    if failures and account_email in failures:
-        last_error = failures[account_email].get("last_error")
-        if last_error:
-            msg = f"⊗ Skipping {account_email} - previous failure: {last_error}"
-            logging.warning(msg)
-            if progress_window:
-                progress_window.log(msg, "WARNING")
-            return 'failed'
-    
     try:
         if progress_window:
             progress_window.log(f"→ Connecting to {account_email}...")
@@ -1192,11 +1184,56 @@ def auto_save_timer(state, downloaded_db, failures, stop_event):
                 logging.error(f"Auto-save failed: {str(e)}")
 
 def process_account_wrapper(account, state, downloaded_db, progress_window, failures):
-    """Wrapper for concurrent processing"""
-    result = process_new_emails_for_account(account, state, downloaded_db, progress_window, failures)
+    """Wrapper for concurrent processing with retry logic"""
+    account_email = account["email"]
+    max_retries = 3
+    retry_delay = 5  # seconds
+    result = 'failed'  # Default to failed
+    
+    for attempt in range(1, max_retries + 1):
+        result = process_new_emails_for_account(account, state, downloaded_db, progress_window, failures)
+        
+        # If successful or gracefully stopped, no retry needed
+        if result in ('success', 'stopped'):
+            if progress_window:
+                progress_window.increment_account()
+            return (account_email, result)
+        
+        # Check if it's a transient error that should be retried
+        if failures and account_email in failures:
+            last_error = failures[account_email].get("error_message", "")
+            
+            # Transient errors that should be retried
+            transient_errors = [
+                'socket error: EOF',
+                'socket.timeout',
+                'IMAP4 abort',
+                'Connection reset',
+                'Broken pipe',
+                'timed out',
+                'ConnectionResetError',
+                'BrokenPipeError',
+                'TimeoutError'
+            ]
+            
+            is_transient = any(err.lower() in last_error.lower() for err in transient_errors)
+            
+            if is_transient and attempt < max_retries:
+                msg = f"⟳ {account_email}: Transient error detected, retrying in {retry_delay}s (attempt {attempt}/{max_retries})"
+                logging.warning(msg)
+                if progress_window:
+                    progress_window.log(msg, "WARNING")
+                
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+        
+        # Non-transient error or max retries reached
+        break
+    
     if progress_window:
         progress_window.increment_account()
-    return (account["email"], result)
+    return (account_email, result)
 
 def main():
     # Create and start GUI

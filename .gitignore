@@ -1,5 +1,6 @@
 # Configuration with sensitive data
 config.json
+state.json
 
 # Log files
 *.log
