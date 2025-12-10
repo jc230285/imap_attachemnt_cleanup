@@ -56,6 +56,10 @@ class ProgressWindow:
         self.status_label = tk.Label(main_frame, text="Initializing...", font=("Arial", 11, "bold"))
         self.status_label.pack(pady=5)
         
+        # Start time label
+        self.start_time_label = tk.Label(main_frame, text="Start Time: --:--:--", font=("Arial", 9))
+        self.start_time_label.pack(pady=2)
+        
         # Runtime label
         self.start_time = None
         self.runtime_label = tk.Label(main_frame, text="Runtime: 00:00:00", font=("Arial", 9))
@@ -121,11 +125,15 @@ class ProgressWindow:
         status_label.pack(side=tk.LEFT, padx=5)
         
         # Runtime label
-        runtime_label = tk.Label(row_frame, text="Time: --:--:--", font=("Arial", 8), width=15)
+        runtime_label = tk.Label(row_frame, text="Time: --:--:-- | Started: --:--:--", font=("Arial", 8), width=30)
         runtime_label.pack(side=tk.LEFT, padx=5)
         
+        # Rate label (emails per minute)
+        rate_label = tk.Label(row_frame, text="Rate: -- msg/min", font=("Arial", 8), width=15)
+        rate_label.pack(side=tk.LEFT, padx=5)
+        
         # ETA label
-        eta_label = tk.Label(row_frame, text="ETA: --:--:--", font=("Arial", 8), width=15)
+        eta_label = tk.Label(row_frame, text="ETA: --:--:--", font=("Arial", 8), width=12)
         eta_label.pack(side=tk.LEFT, padx=5)
         
         # Stop button
@@ -140,6 +148,7 @@ class ProgressWindow:
             'progress_bar': progress_bar,
             'status_label': status_label,
             'runtime_label': runtime_label,
+            'rate_label': rate_label,
             'eta_label': eta_label,
             'stop_button': stop_button,
             'stop_event': stop_event,
@@ -206,12 +215,19 @@ class ProgressWindow:
             self.root.after(0, _update)
     
     def update_account_runtime(self):
-        """Update runtime for all active accounts"""
+        """Update runtime and rate for all active accounts"""
         for email, widgets in self.account_widgets.items():
             if widgets['start_time']:
                 elapsed = datetime.now() - widgets['start_time']
                 runtime_str = str(timedelta(seconds=int(elapsed.total_seconds())))
-                widgets['runtime_label'].config(text=f"Time: {runtime_str}")
+                start_time_str = widgets['start_time'].strftime("%H:%M:%S")
+                widgets['runtime_label'].config(text=f"Time: {runtime_str} | Started: {start_time_str}")
+                
+                # Calculate messages per minute rate
+                elapsed_minutes = elapsed.total_seconds() / 60
+                if elapsed_minutes > 0 and widgets['processed_messages'] > 0:
+                    rate = widgets['processed_messages'] / elapsed_minutes
+                    widgets['rate_label'].config(text=f"Rate: {rate:.1f} msg/min")
         
         # Schedule next update
         self.root.after(1000, self.update_account_runtime)
@@ -222,6 +238,11 @@ class ProgressWindow:
             elapsed = datetime.now() - self.start_time
             runtime_str = str(timedelta(seconds=int(elapsed.total_seconds())))
             self.runtime_label.config(text=f"Runtime: {runtime_str}")
+            
+            # Update start time label if not set
+            if "--:--:--" in self.start_time_label.cget("text"):
+                start_time_str = self.start_time.strftime("%H:%M:%S")
+                self.start_time_label.config(text=f"Start Time: {start_time_str}")
         
         # Schedule next update
         self.root.after(1000, self.update_runtime)
