@@ -698,7 +698,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             logging.warning(msg)
             if progress_window:
                 progress_window.log(msg, "WARNING")
-            return False
+            return 'failed'
     
     try:
         if progress_window:
@@ -735,7 +735,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             if progress_window:
                 progress_window.log(f"✗ {account_email}: {error_msg}", "ERROR")
                 progress_window.complete_account(account_email, success=False)
-            return False
+            return 'failed'
 
         uids = data[0].split()
         if not uids:
@@ -746,7 +746,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 progress_window.complete_account(account_email, success=True)
             if failures:
                 record_success(account_email, failures)
-            return True
+            return 'success'
 
         total_uids = len(uids)
         if progress_window:
@@ -771,7 +771,15 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 if progress_window:
                     progress_window.log(f"⏸ {account_email}: Stopped by user", "WARNING")
                     progress_window.complete_account(account_email, success=False)
-                return False
+                # Save progress before stopping
+                with state_lock:
+                    if idx > 1:  # Only save if we processed at least one message
+                        acc_state["last_processed_uid"] = int(uids[idx-2].decode())
+                        state[account_email] = acc_state
+                    save_state(state)
+                with db_lock:
+                    save_downloaded_db(downloaded_db, GLOBAL_ACCOUNTS)
+                return 'stopped'  # Return special status for graceful stop
             
             uid_str = uid.decode()
             logging.info(f"[{account_email}] Processing UID {uid_str} ({idx}/{total_uids})")
@@ -922,7 +930,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             progress_window.log(f"✓ {account_email}: Completed ({attachments_in_account} attachments saved)", "SUCCESS")
             progress_window.complete_account(account_email, success=True)
         
-        return True
+        return 'success'
 
     except Exception as e:
         error_msg = f"{type(e).__name__}: {str(e)}"
@@ -933,7 +941,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             progress_window.complete_account(account_email, success=False)
         if failures:
             record_failure(account_email, error_msg, failures)
-        return False
+        return 'failed'
         
     finally:
         if imap is not None:
@@ -1163,6 +1171,7 @@ def main():
             
             successful_accounts = []
             failed_accounts = []
+            stopped_accounts = []
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
@@ -1181,14 +1190,16 @@ def main():
                 for future in as_completed(futures):
                     email = futures[future]
                     try:
-                        success = future.result()
+                        result = future.result()
                         completed += 1
                         progress = 10 + (completed / len(accounts)) * 40  # 10% to 50%
                         progress_window.update_progress(progress, f"Downloaded: {completed}/{len(accounts)}")
                         
-                        if success:
+                        if result == 'success':
                             successful_accounts.append(email)
-                        else:
+                        elif result == 'stopped':
+                            stopped_accounts.append(email)
+                        else:  # 'failed'
                             failed_accounts.append(email)
                         
                     except Exception as e:
@@ -1211,11 +1222,13 @@ def main():
             progress_window.log("--- Starting retention-based deletion ---")
             
             for idx, account in enumerate(accounts, 1):
-                if account["email"] in failed_accounts:
-                    progress_window.log(f"⊗ Skipping deletion for {account['email']} (download failed)")
-                    continue
-                    
                 email_addr = account["email"]
+                if email_addr in failed_accounts:
+                    progress_window.log(f"⊗ Skipping deletion for {email_addr} (download failed)")
+                    continue
+                if email_addr in stopped_accounts:
+                    progress_window.log(f"⏸ Skipping deletion for {email_addr} (stopped by user)")
+                    continue
                 progress_window.log(f"→ Checking retention for {email_addr}...")
                 delete_old_attachments_for_account(account, state, downloaded_db, progress_window)
                 
@@ -1236,6 +1249,9 @@ def main():
             progress_window.log("=" * 50)
             progress_window.log(f"=== COMPLETED ===", "SUCCESS")
             progress_window.log(f"Successful accounts: {len(successful_accounts)}")
+            if stopped_accounts:
+                progress_window.log(f"Stopped accounts: {len(stopped_accounts)}", "WARNING")
+                progress_window.log(f"Stopped: {', '.join(stopped_accounts)}", "WARNING")
             progress_window.log(f"Failed accounts: {len(failed_accounts)}")
             if failed_accounts:
                 progress_window.log(f"Failed: {', '.join(failed_accounts)}", "ERROR")
