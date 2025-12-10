@@ -19,7 +19,7 @@ import traceback
 # ---------- CONFIG / PATHS ----------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ATTACHMENTS_ROOT = os.path.join(BASE_DIR, "attachments")
+DEFAULT_ATTACHMENTS_ROOT = os.path.join(BASE_DIR, "attachments")  # Fallback if not specified in config
 STATE_FILE = os.path.join(BASE_DIR, "state.json")
 DOWNLOADED_CSV = os.path.join(BASE_DIR, "downloaded.csv")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -27,7 +27,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 FAILURE_LOG = os.path.join(BASE_DIR, "failures.json")
 
 os.makedirs(LOG_DIR, exist_ok=True)
-os.makedirs(ATTACHMENTS_ROOT, exist_ok=True)
+os.makedirs(DEFAULT_ATTACHMENTS_ROOT, exist_ok=True)
 
 logging.basicConfig(
     filename=os.path.join(LOG_DIR, "mail_cleaner.log"),
@@ -272,8 +272,10 @@ def parse_email_date(date_header) -> datetime:
     except Exception:
         return datetime.now(timezone.utc)
 
-def load_hash_index(account_email: str):
-    idx_path = os.path.join(ATTACHMENTS_ROOT, sanitize_email_for_folder(account_email), ".hashes.json")
+def load_hash_index(account_email: str, attachments_root: str = None):
+    if attachments_root is None:
+        attachments_root = DEFAULT_ATTACHMENTS_ROOT
+    idx_path = os.path.join(attachments_root, sanitize_email_for_folder(account_email), ".hashes.json")
     if not os.path.exists(idx_path):
         return set(), idx_path
     with open(idx_path, "r") as f:
@@ -420,8 +422,12 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         if progress_window:
             progress_window.log(f"Processing {total_uids} messages for {account_email}")
 
-        known_hashes, hash_idx_path = load_hash_index(account_email)
-        acc_dir = os.path.join(ATTACHMENTS_ROOT, sanitize_email_for_folder(account_email))
+        # Get custom folder path from account config, fallback to default
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        os.makedirs(attachments_root, exist_ok=True)
+        
+        known_hashes, hash_idx_path = load_hash_index(account_email, attachments_root)
+        acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
         # Don't create acc_dir here - only create when we actually save attachments
 
         attachments_in_account = 0
@@ -487,7 +493,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 # Thread-safe check: reload hash index to catch concurrent updates
                 with hash_index_lock:
                     # Reload to get latest from disk (in case another thread added it)
-                    current_hashes, _ = load_hash_index(account_email)
+                    current_hashes, _ = load_hash_index(account_email, attachments_root)
                     
                     if md5 in current_hashes or md5 in new_hashes:
                         logging.info(f"[{account_email}] UID {uid_str} attachment duplicate (hash: {md5[:8]}...), skipping")

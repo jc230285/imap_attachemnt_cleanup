@@ -5,6 +5,7 @@
       "imap_host": "imap.gmail.com",
       "username": "your-email@example.com",
       "password": "YOUR_APP_PASSWORD_HERE",
+      "folder": "C:\\path\\to\\attachments",
       "retention_days": 700
     },
     {
@@ -12,6 +13,7 @@
       "imap_host": "imap.gmail.com",
       "username": "another-email@example.com",
       "password": "YOUR_APP_PASSWORD_HERE",
+      "folder": "C:\\path\\to\\attachments",
       "retention_days": -1
     }
   ]
