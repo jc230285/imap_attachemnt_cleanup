@@ -372,73 +372,100 @@ def calculate_age_days(sent_dt: datetime) -> int:
     delta = now - sent_dt
     return delta.days
 
-def deduplicate_account_folder(account_email: str, attachments_root: str, progress_window=None):
-    """Remove duplicate files in account folder, keeping only the oldest (first) occurrence"""
-    acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
-    
-    if not os.path.exists(acc_dir):
-        return 0, 0
-    
+def deduplicate_all_accounts(accounts, progress_window=None):
+    """
+    Deduplicate files across ALL account folders.
+    Keeps only the oldest (first created) file for each hash.
+    """
     if progress_window:
-        progress_window.log(f"  → Deduplicating {account_email}...")
+        progress_window.log("\n--- Starting Global Deduplication ---")
     
-    # Build hash map: hash -> list of (file_path, mtime)
+    # Build a global hash map: hash -> (file_path, creation_time)
     hash_map = {}
     total_files = 0
     
-    for root, dirs, files in os.walk(acc_dir):
-        # Skip the .hashes.json file itself
-        for filename in files:
-            if filename == ".hashes.json" or filename == "downloaded.csv":
-                continue
-                
-            file_path = os.path.join(root, filename)
-            total_files += 1
-            
-            try:
-                with open(file_path, "rb") as f:
-                    file_hash = hashlib.md5(f.read()).hexdigest()
-                
-                mtime = os.path.getmtime(file_path)
-                
-                if file_hash not in hash_map:
-                    hash_map[file_hash] = []
-                hash_map[file_hash].append((file_path, mtime))
-                
-            except Exception as e:
-                logging.warning(f"Could not hash {file_path}: {str(e)}")
-                continue
-    
-    # Find and remove duplicates (keep oldest)
-    duplicates_removed = 0
-    bytes_freed = 0
-    
-    for file_hash, file_list in hash_map.items():
-        if len(file_list) <= 1:
+    # Scan all account folders
+    for account in accounts:
+        account_email = account["email"]
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
+        
+        if not os.path.exists(acc_dir):
             continue
         
-        # Sort by mtime (oldest first)
-        file_list.sort(key=lambda x: x[1])
+        # Walk through all files in this account folder
+        for root, dirs, files in os.walk(acc_dir):
+            for filename in files:
+                # Skip metadata files
+                if filename in ['.hashes.json', 'downloaded.csv']:
+                    continue
+                
+                filepath = os.path.join(root, filename)
+                total_files += 1
+                
+                try:
+                    # Calculate hash
+                    with open(filepath, 'rb') as f:
+                        file_hash = hashlib.md5(f.read()).hexdigest()
+                    
+                    # Get file creation time (oldest timestamp)
+                    creation_time = os.path.getctime(filepath)
+                    
+                    # Track the oldest file for each hash
+                    if file_hash not in hash_map:
+                        hash_map[file_hash] = (filepath, creation_time)
+                    else:
+                        existing_path, existing_time = hash_map[file_hash]
+                        # Keep the older file
+                        if creation_time < existing_time:
+                            hash_map[file_hash] = (filepath, creation_time)
+                
+                except Exception as e:
+                    logging.warning(f"Error processing {filepath}: {e}")
+    
+    # Now find and remove duplicates
+    duplicates_removed = 0
+    space_freed = 0
+    
+    for account in accounts:
+        account_email = account["email"]
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
         
-        # Keep the first (oldest), delete the rest
-        for file_path, _ in file_list[1:]:
-            try:
-                file_size = os.path.getsize(file_path)
-                os.remove(file_path)
-                duplicates_removed += 1
-                bytes_freed += file_size
-                logging.info(f"Removed duplicate: {file_path}")
-            except Exception as e:
-                logging.warning(f"Could not remove {file_path}: {str(e)}")
+        if not os.path.exists(acc_dir):
+            continue
+        
+        for root, dirs, files in os.walk(acc_dir):
+            for filename in files:
+                if filename in ['.hashes.json', 'downloaded.csv']:
+                    continue
+                
+                filepath = os.path.join(root, filename)
+                
+                try:
+                    with open(filepath, 'rb') as f:
+                        file_hash = hashlib.md5(f.read()).hexdigest()
+                    
+                    # If this file is NOT the keeper, delete it
+                    keeper_path, _ = hash_map[file_hash]
+                    if filepath != keeper_path:
+                        file_size = os.path.getsize(filepath)
+                        os.remove(filepath)
+                        duplicates_removed += 1
+                        space_freed += file_size
+                        logging.info(f"Removed duplicate: {filepath} (kept {keeper_path})")
+                
+                except Exception as e:
+                    logging.warning(f"Error removing duplicate {filepath}: {e}")
     
-    if progress_window and duplicates_removed > 0:
-        mb_freed = bytes_freed / (1024 * 1024)
-        progress_window.log(f"    Removed {duplicates_removed} duplicates, freed {mb_freed:.2f} MB")
-    elif progress_window:
-        progress_window.log(f"    No duplicates found")
+    # Log results
+    space_freed_mb = space_freed / (1024 * 1024)
+    msg = f"Deduplication complete: {duplicates_removed} duplicates removed, {space_freed_mb:.2f} MB freed"
+    logging.info(msg)
+    if progress_window:
+        progress_window.log(f"✓ {msg}", "SUCCESS")
     
-    logging.info(f"[{account_email}] Deduplication: removed {duplicates_removed} files, freed {bytes_freed} bytes")
-    return duplicates_removed, bytes_freed
+    return duplicates_removed, space_freed
 
 # ---------- IMAP HELPERS ----------
 
@@ -678,11 +705,6 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         
         if failures:
             record_success(account_email, failures)
-        
-        # Run deduplication on this account's folder
-        if progress_window:
-            progress_window.log(f"  Running deduplication for {account_email}...")
-        deduplicate_account_folder(account_email, attachments_root, progress_window)
         
         # Save state and DB immediately after processing this account
         with state_lock:
@@ -973,6 +995,10 @@ def main():
             save_state(state)
             save_downloaded_db(downloaded_db, accounts)
             save_failures(failures)
+
+            # Run global deduplication across all accounts
+            progress_window.update_progress(57, "Deduplicating across all accounts...")
+            deduplicate_all_accounts(accounts, progress_window)
 
             # Task 2: Deletion (sequential to avoid conflicts)
             progress_window.update_progress(60, "Processing retention deletions...")
