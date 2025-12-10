@@ -358,8 +358,10 @@ def select_all_mail(imap):
 
 # ---------- TASK 1: DOWNLOAD ATTACHMENTS ----------
 
-# Global lock for hash index operations
+# Global locks for thread-safe operations
 hash_index_lock = threading.Lock()
+state_lock = threading.Lock()
+db_lock = threading.Lock()
 
 def process_new_emails_for_account(account, state, downloaded_db, progress_window=None, failures=None):
     account_email = account["email"]
@@ -382,7 +384,9 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         imap = connect_imap(account)
         select_all_mail(imap)
 
-        acc_state = state.get(account_email, {})
+        # Thread-safe read of account state
+        with state_lock:
+            acc_state = state.get(account_email, {}).copy()  # Make a copy to avoid race conditions
         last_uid = acc_state.get("last_processed_uid")
         last_date = acc_state.get("last_processed_date")
 
@@ -550,11 +554,15 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 existing_files.extend(attachment_filenames)
                 entry["attachment_filenames"] = ";".join(sorted(set(existing_files)))
 
-                downloaded_db[key] = entry
+                # Thread-safe database update
+                with db_lock:
+                    downloaded_db[key] = entry
 
-            acc_state["last_processed_uid"] = int(uid_str)
-            acc_state["last_processed_date"] = sent_date_iso
-            state[account_email] = acc_state
+            # Thread-safe state update
+            with state_lock:
+                acc_state["last_processed_uid"] = int(uid_str)
+                acc_state["last_processed_date"] = sent_date_iso
+                state[account_email] = acc_state
             
             if progress_window:
                 progress_window.increment_messages()
@@ -565,6 +573,13 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         
         if failures:
             record_success(account_email, failures)
+        
+        # Save state and DB immediately after processing this account
+        with state_lock:
+            save_state(state)
+        with db_lock:
+            save_downloaded_db(downloaded_db)
+        save_failures(failures)
         
         if progress_window:
             progress_window.log(f"✓ {account_email}: Completed ({attachments_in_account} attachments saved)", "SUCCESS")
