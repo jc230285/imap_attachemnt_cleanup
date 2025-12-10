@@ -8,7 +8,7 @@ import hashlib
 import logging
 import tkinter as tk
 from tkinter import ttk, scrolledtext
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email import policy
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime, parseaddr
@@ -40,14 +40,197 @@ class ProgressWindow:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("IMAP Mailbox Cleaner - Progress")
-        self.root.geometry("1000x700")
+        self.root.geometry("1200x800")
         
-        # Progress bar
+        # Main progress bar
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(pady=10, padx=10, fill=tk.X)
+        
+        tk.Label(main_frame, text="Overall Progress:", font=("Arial", 10, "bold")).pack(anchor=tk.W)
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(
-            self.root, variable=self.progress_var, maximum=100, length=980
+            main_frame, variable=self.progress_var, maximum=100, length=1180
         )
-        self.progress_bar.pack(pady=10, padx=10)
+        self.progress_bar.pack(pady=5)
+        
+        self.status_label = tk.Label(main_frame, text="Initializing...", font=("Arial", 11, "bold"))
+        self.status_label.pack(pady=5)
+        
+        # Runtime label
+        self.start_time = None
+        self.runtime_label = tk.Label(main_frame, text="Runtime: 00:00:00", font=("Arial", 9))
+        self.runtime_label.pack(pady=2)
+        
+        # Account progress section
+        account_frame = tk.LabelFrame(self.root, text="Account Progress", font=("Arial", 10, "bold"), padx=10, pady=10)
+        account_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+        
+        # Scrollable canvas for account rows
+        canvas = tk.Canvas(account_frame, height=250)
+        scrollbar = ttk.Scrollbar(account_frame, orient="vertical", command=canvas.yview)
+        self.account_inner_frame = tk.Frame(canvas)
+        
+        self.account_inner_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.account_inner_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Account tracking
+        self.account_widgets = {}  # email -> {frame, progress_bar, status_label, runtime_label, eta_label, stop_button, stop_event, start_time}
+        
+        # Log area
+        log_frame = tk.Frame(self.root)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        tk.Label(log_frame, text="Activity Log:", font=("Arial", 10, "bold")).pack(anchor=tk.W)
+        
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame, wrap=tk.WORD, height=15, font=("Consolas", 9), bg="#f5f5f5"
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        
+        self.lock = threading.Lock()
+        self.messages_processed = 0
+        self.attachments_saved = 0
+        
+        # Start runtime updater
+        self.update_runtime()
+        
+    def create_account_row(self, email):
+        """Create a progress row for an account"""
+        row_frame = tk.Frame(self.account_inner_frame, relief=tk.RIDGE, borderwidth=1, padx=5, pady=5)
+        row_frame.pack(fill=tk.X, pady=3)
+        
+        # Email label
+        email_label = tk.Label(row_frame, text=email, font=("Arial", 9, "bold"), width=30, anchor=tk.W)
+        email_label.pack(side=tk.LEFT, padx=5)
+        
+        # Progress bar
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(row_frame, variable=progress_var, maximum=100, length=300)
+        progress_bar.pack(side=tk.LEFT, padx=5)
+        
+        # Status label
+        status_label = tk.Label(row_frame, text="Waiting...", font=("Arial", 8), width=20, anchor=tk.W)
+        status_label.pack(side=tk.LEFT, padx=5)
+        
+        # Runtime label
+        runtime_label = tk.Label(row_frame, text="Time: --:--:--", font=("Arial", 8), width=15)
+        runtime_label.pack(side=tk.LEFT, padx=5)
+        
+        # ETA label
+        eta_label = tk.Label(row_frame, text="ETA: --:--:--", font=("Arial", 8), width=15)
+        eta_label.pack(side=tk.LEFT, padx=5)
+        
+        # Stop button
+        stop_event = threading.Event()
+        stop_button = tk.Button(row_frame, text="Stop", font=("Arial", 8), width=8,
+                                command=lambda: self.stop_account(email))
+        stop_button.pack(side=tk.LEFT, padx=5)
+        
+        self.account_widgets[email] = {
+            'frame': row_frame,
+            'progress_var': progress_var,
+            'progress_bar': progress_bar,
+            'status_label': status_label,
+            'runtime_label': runtime_label,
+            'eta_label': eta_label,
+            'stop_button': stop_button,
+            'stop_event': stop_event,
+            'start_time': None,
+            'total_messages': 0,
+            'processed_messages': 0
+        }
+        
+    def stop_account(self, email):
+        """Gracefully stop processing for an account"""
+        if email in self.account_widgets:
+            self.account_widgets[email]['stop_event'].set()
+            self.account_widgets[email]['stop_button'].config(state=tk.DISABLED, text="Stopping...")
+            self.log(f"⏸ Stop requested for {email}", "WARNING")
+            
+    def update_account_progress(self, email, progress, status="", total_messages=None, processed_messages=None):
+        """Update progress for a specific account"""
+        if email not in self.account_widgets:
+            self.create_account_row(email)
+        
+        widgets = self.account_widgets[email]
+        
+        def _update():
+            widgets['progress_var'].set(progress)
+            if status:
+                widgets['status_label'].config(text=status)
+            
+            # Update message counts
+            if total_messages is not None:
+                widgets['total_messages'] = total_messages
+            if processed_messages is not None:
+                widgets['processed_messages'] = processed_messages
+                
+            # Calculate ETA
+            if widgets['start_time'] and widgets['total_messages'] > 0 and widgets['processed_messages'] > 0:
+                elapsed = (datetime.now() - widgets['start_time']).total_seconds()
+                rate = widgets['processed_messages'] / elapsed if elapsed > 0 else 0
+                remaining = widgets['total_messages'] - widgets['processed_messages']
+                
+                if rate > 0:
+                    eta_seconds = remaining / rate
+                    eta_str = str(timedelta(seconds=int(eta_seconds)))
+                    widgets['eta_label'].config(text=f"ETA: {eta_str}")
+                    
+        self.root.after(0, _update)
+    
+    def start_account(self, email):
+        """Mark account as started"""
+        if email not in self.account_widgets:
+            self.create_account_row(email)
+        self.account_widgets[email]['start_time'] = datetime.now()
+        self.update_account_progress(email, 0, "Starting...")
+        
+    def complete_account(self, email, success=True):
+        """Mark account as completed"""
+        if email in self.account_widgets:
+            status = "✓ Completed" if success else "✗ Failed"
+            color = "green" if success else "red"
+            
+            def _update():
+                self.account_widgets[email]['status_label'].config(text=status, fg=color)
+                self.account_widgets[email]['stop_button'].config(state=tk.DISABLED)
+                self.account_widgets[email]['eta_label'].config(text="")
+            self.root.after(0, _update)
+    
+    def update_account_runtime(self):
+        """Update runtime for all active accounts"""
+        for email, widgets in self.account_widgets.items():
+            if widgets['start_time']:
+                elapsed = datetime.now() - widgets['start_time']
+                runtime_str = str(timedelta(seconds=int(elapsed.total_seconds())))
+                widgets['runtime_label'].config(text=f"Time: {runtime_str}")
+        
+        # Schedule next update
+        self.root.after(1000, self.update_account_runtime)
+    
+    def update_runtime(self):
+        """Update overall runtime"""
+        if self.start_time:
+            elapsed = datetime.now() - self.start_time
+            runtime_str = str(timedelta(seconds=int(elapsed.total_seconds())))
+            self.runtime_label.config(text=f"Runtime: {runtime_str}")
+        
+        # Schedule next update
+        self.root.after(1000, self.update_runtime)
+    
+    def is_account_stopped(self, email):
+        """Check if stop was requested for an account"""
+        if email in self.account_widgets:
+            return self.account_widgets[email]['stop_event'].is_set()
+        return False
         
         # Status label
         self.status_label = tk.Label(self.root, text="Initializing...", font=("Arial", 11, "bold"))
@@ -105,49 +288,11 @@ class ProgressWindow:
         self.messages_processed = 0
         self.attachments_saved = 0
         
-    def set_total_accounts(self, total):
-        self.total_accounts = total
-        self.update_stats()
-        
-    def increment_account(self):
-        self.accounts_completed += 1
-        self.update_stats()
-        
     def increment_messages(self, count=1):
         self.messages_processed += count
-        self.update_stats()
         
     def increment_attachments(self, count=1):
         self.attachments_saved += count
-        self.update_stats()
-        
-    def update_stats(self):
-        def _update():
-            self.stats_label.config(
-                text=f"Accounts: {self.accounts_completed}/{self.total_accounts} | "
-                     f"Messages: {self.messages_processed} | "
-                     f"Attachments: {self.attachments_saved}"
-            )
-        self.root.after(0, _update)
-    
-    def update_current_processing(self, account, email_date=None):
-        def _update():
-            self.current_account_label.config(text=f"Account: {account}")
-            if email_date:
-                self.current_date_label.config(text=f"Email Date: {email_date}")
-            else:
-                self.current_date_label.config(text="Email Date: None")
-        self.root.after(0, _update)
-    
-    def update_last_successful(self, account, date_str):
-        def _update():
-            self.last_success_label.config(text=f"{account}\n{date_str}")
-        self.root.after(0, _update)
-    
-    def update_last_failed(self, account, date_str, error):
-        def _update():
-            self.last_failure_label.config(text=f"{account}\n{date_str}\n{error[:50]}")
-        self.root.after(0, _update)
         
     def update_progress(self, value, status=""):
         def _update():
@@ -512,6 +657,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
     try:
         if progress_window:
             progress_window.log(f"→ Connecting to {account_email}...")
+            progress_window.start_account(account_email)
         
         imap = connect_imap(account)
         select_all_mail(imap)
@@ -542,6 +688,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 record_failure(account_email, error_msg, failures)
             if progress_window:
                 progress_window.log(f"✗ {account_email}: {error_msg}", "ERROR")
+                progress_window.complete_account(account_email, success=False)
             return False
 
         uids = data[0].split()
@@ -550,6 +697,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             logging.info(f"[{account_email}] No new messages to process")
             if progress_window:
                 progress_window.log(msg, "SUCCESS")
+                progress_window.complete_account(account_email, success=True)
             if failures:
                 record_success(account_email, failures)
             return True
@@ -557,6 +705,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         total_uids = len(uids)
         if progress_window:
             progress_window.log(f"Processing {total_uids} messages for {account_email}")
+            progress_window.update_account_progress(account_email, 0, "Processing...", total_messages=total_uids, processed_messages=0)
 
         # Get custom folder path from account config, fallback to default
         attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
@@ -570,8 +719,22 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         new_hashes = set()  # Track new hashes found in this run
         
         for idx, uid in enumerate(uids, 1):
+            # Check if stop was requested
+            if progress_window and progress_window.is_account_stopped(account_email):
+                logging.warning(f"[{account_email}] Stop requested by user")
+                if progress_window:
+                    progress_window.log(f"⏸ {account_email}: Stopped by user", "WARNING")
+                    progress_window.complete_account(account_email, success=False)
+                return False
+            
             uid_str = uid.decode()
             logging.info(f"[{account_email}] Processing UID {uid_str} ({idx}/{total_uids})")
+            
+            # Update progress
+            progress_pct = (idx / total_uids) * 100
+            if progress_window:
+                progress_window.update_account_progress(account_email, progress_pct, f"Message {idx}/{total_uids}", 
+                                                        total_messages=total_uids, processed_messages=idx)
 
             typ, msg_data = imap.uid("FETCH", uid, "(RFC822)")
             if typ != "OK" or not msg_data or msg_data[0] is None:
@@ -583,10 +746,6 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
 
             sent_dt = parse_email_date(msg.get("Date"))
             sent_date_iso = sent_dt.astimezone(timezone.utc).isoformat()
-            
-            # Update GUI with current processing info
-            if progress_window:
-                progress_window.update_current_processing(account_email, sent_date_iso)
 
             from_email = parseaddr(msg.get("From", ""))[1] or "unknown"
             to_email = parseaddr(msg.get("To", ""))[1] or "unknown"
@@ -715,6 +874,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         
         if progress_window:
             progress_window.log(f"✓ {account_email}: Completed ({attachments_in_account} attachments saved)", "SUCCESS")
+            progress_window.complete_account(account_email, success=True)
         
         return True
 
@@ -724,6 +884,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         logging.error(traceback.format_exc())
         if progress_window:
             progress_window.log(f"✗ {account_email}: {error_msg}", "ERROR")
+            progress_window.complete_account(account_email, success=False)
         if failures:
             record_failure(account_email, error_msg, failures)
         return False
@@ -927,13 +1088,15 @@ def main():
                     last_error = failures[email].get("last_error")
                     
                     if last_success:
-                        progress_window.update_last_successful(email, last_success)
                         progress_window.log(f"    ✓ Last success: {last_success}", "SUCCESS")
                     if last_failure and last_error:
-                        progress_window.update_last_failed(email, last_failure, last_error)
                         progress_window.log(f"    ✗ Last failure: {last_failure} - {last_error}", "ERROR")
             
             progress_window.log("--- End Previous Run Information ---\n")
+            
+            # Create account rows in GUI
+            for account in accounts:
+                progress_window.create_account_row(account["email"])
             
             # Start auto-save timer
             stop_auto_save = threading.Event()
@@ -945,7 +1108,6 @@ def main():
             auto_save_thread.start()
             progress_window.log("Auto-save enabled (every 60 seconds)\n")
 
-            progress_window.set_total_accounts(len(accounts))
             progress_window.log(f"Found {len(accounts)} account(s) to process")
             progress_window.update_progress(10, f"Processing {len(accounts)} accounts...")
 
@@ -982,8 +1144,6 @@ def main():
                             successful_accounts.append(email)
                         else:
                             failed_accounts.append(email)
-                            
-                        progress_window.increment_account()
                         
                     except Exception as e:
                         progress_window.log(f"✗ Unexpected error for {email}: {str(e)}", "ERROR")
