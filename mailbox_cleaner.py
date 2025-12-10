@@ -380,7 +380,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 folder_party = sanitize_part(from_email)
 
             dest_dir = os.path.join(acc_dir, folder_party)
-            os.makedirs(dest_dir, exist_ok=True)
+            # Don't create dest_dir yet - only create when we actually have attachments to save
 
             attachment_filenames = []
             any_attachments = False
@@ -414,6 +414,9 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                     
                     # Mark as new so we don't save it again in this same run
                     new_hashes.add(md5)
+
+                # Create destination directory only when we have a unique attachment to save
+                os.makedirs(dest_dir, exist_ok=True)
 
                 date_prefix = sent_dt.astimezone(timezone.utc).strftime("%Y%m%d_%H%M")
                 base_name = safe_filename(filename or "attachment.bin")
