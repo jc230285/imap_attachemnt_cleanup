@@ -1,0 +1,18 @@
+{
+  "accounts": [
+    {
+      "email": "your-email@example.com",
+      "imap_host": "imap.gmail.com",
+      "username": "your-email@example.com",
+      "password": "YOUR_APP_PASSWORD_HERE",
+      "retention_days": 700
+    },
+    {
+      "email": "another-email@example.com",
+      "imap_host": "imap.gmail.com",
+      "username": "another-email@example.com",
+      "password": "YOUR_APP_PASSWORD_HERE",
+      "retention_days": -1
+    }
+  ]
+}
