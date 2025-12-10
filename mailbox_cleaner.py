@@ -236,12 +236,12 @@ def sanitize_part(s: str) -> str:
     return s or "unknown"
 
 def sanitize_email_for_folder(email: str) -> str:
-    """Sanitize email address for folder name - preserves @ and -"""
+    """Sanitize email address for folder name - replaces @ with _"""
     if not email:
         return "unknown"
     # Replace @ with _ and keep everything else that's safe for folders
-    email = email.replace(" ", "_")
-    email = "".join(c for c in email if c.isalnum() or c in "._-@")
+    email = email.replace(" ", "_").replace("@", "_")
+    email = "".join(c for c in email if c.isalnum() or c in "._-")
     return email or "unknown"
 
 def extract_email_parts(email: str) -> tuple:
@@ -422,7 +422,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
 
         known_hashes, hash_idx_path = load_hash_index(account_email)
         acc_dir = os.path.join(ATTACHMENTS_ROOT, sanitize_email_for_folder(account_email))
-        os.makedirs(acc_dir, exist_ok=True)
+        # Don't create acc_dir here - only create when we actually save attachments
 
         attachments_in_account = 0
         new_hashes = set()  # Track new hashes found in this run
@@ -496,8 +496,10 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                     # Mark as new so we don't save it again in this same run
                     new_hashes.add(md5)
 
-                # Create destination directory only when we have a unique attachment to save
+                # Create destination directory AND account directory only when we have a unique attachment to save
                 os.makedirs(dest_dir, exist_ok=True)
+                # Ensure account directory exists too
+                os.makedirs(acc_dir, exist_ok=True)
 
                 date_prefix = sent_dt.astimezone(timezone.utc).strftime("%Y%m%d_%H%M")
                 base_name = safe_filename(filename or "attachment.bin")
