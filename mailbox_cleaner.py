@@ -182,13 +182,23 @@ def record_failure(account_email, error_msg, failures):
     failures[account_email]["error_message"] = str(error_msg)
 
 def sanitize_part(s: str) -> str:
+    """Sanitize a string for use in file/folder names"""
     if not s:
         return "unknown"
-    # basic sanitisation
-    s = s.replace("@", "_")
     s = s.replace(" ", "_")
     s = "".join(c for c in s if c.isalnum() or c in "._-")
     return s or "unknown"
+
+def extract_email_parts(email: str) -> tuple:
+    """Extract domain and user parts from an email address"""
+    if not email or "@" not in email:
+        return "unknown", "unknown"
+    
+    try:
+        user, domain = email.rsplit("@", 1)
+        return sanitize_part(domain), sanitize_part(user)
+    except Exception:
+        return "unknown", "unknown"
 
 def safe_filename(name: str) -> str:
     if not name:
@@ -374,12 +384,17 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             to_email = parseaddr(msg.get("To", ""))[1] or "unknown"
             subject = msg.get("Subject", "")
 
+            # Determine which email to use for folder organization
             if from_email.lower() == account_email.lower():
-                folder_party = sanitize_part(to_email)
+                party_email = to_email
             else:
-                folder_party = sanitize_part(from_email)
-
-            dest_dir = os.path.join(acc_dir, folder_party)
+                party_email = from_email
+            
+            # Extract domain and user parts
+            domain, user = extract_email_parts(party_email)
+            
+            # Create folder structure: attachments/{account}/{domain}/{user}/
+            dest_dir = os.path.join(acc_dir, domain, user)
             # Don't create dest_dir yet - only create when we actually have attachments to save
 
             attachment_filenames = []
