@@ -235,6 +235,15 @@ def sanitize_part(s: str) -> str:
     s = "".join(c for c in s if c.isalnum() or c in "._-")
     return s or "unknown"
 
+def sanitize_email_for_folder(email: str) -> str:
+    """Sanitize email address for folder name - preserves @ and -"""
+    if not email:
+        return "unknown"
+    # Replace @ with _ and keep everything else that's safe for folders
+    email = email.replace(" ", "_")
+    email = "".join(c for c in email if c.isalnum() or c in "._-@")
+    return email or "unknown"
+
 def extract_email_parts(email: str) -> tuple:
     """Extract domain and user parts from an email address"""
     if not email or "@" not in email:
@@ -264,7 +273,7 @@ def parse_email_date(date_header) -> datetime:
         return datetime.now(timezone.utc)
 
 def load_hash_index(account_email: str):
-    idx_path = os.path.join(ATTACHMENTS_ROOT, sanitize_part(account_email), ".hashes.json")
+    idx_path = os.path.join(ATTACHMENTS_ROOT, sanitize_email_for_folder(account_email), ".hashes.json")
     if not os.path.exists(idx_path):
         return set(), idx_path
     with open(idx_path, "r") as f:
@@ -373,13 +382,20 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
 
         acc_state = state.get(account_email, {})
         last_uid = acc_state.get("last_processed_uid")
+        last_date = acc_state.get("last_processed_date")
 
         if last_uid:
             search_criteria = f"(UID {int(last_uid) + 1}:*)"
+            start_msg = f"Resuming from UID {int(last_uid) + 1} (last processed: {last_date or 'unknown'})"
         else:
             search_criteria = "ALL"
+            start_msg = "Starting from beginning (first run)"
 
+        logging.info(f"[{account_email}] {start_msg}")
         logging.info(f"[{account_email}] Searching with {search_criteria}")
+        if progress_window:
+            progress_window.log(f"  {start_msg}")
+        
         typ, data = imap.uid("SEARCH", None, search_criteria)
         if typ != "OK":
             error_msg = f"UID SEARCH failed"
@@ -405,7 +421,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             progress_window.log(f"Processing {total_uids} messages for {account_email}")
 
         known_hashes, hash_idx_path = load_hash_index(account_email)
-        acc_dir = os.path.join(ATTACHMENTS_ROOT, sanitize_part(account_email))
+        acc_dir = os.path.join(ATTACHMENTS_ROOT, sanitize_email_for_folder(account_email))
         os.makedirs(acc_dir, exist_ok=True)
 
         attachments_in_account = 0
