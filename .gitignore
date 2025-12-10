@@ -18,6 +18,9 @@ failures.json
 # Attachments directory
 attachments/
 
+# Utility scripts folder
+scripts/
+
 # Python cache
 __pycache__/
 *.py[cod]
