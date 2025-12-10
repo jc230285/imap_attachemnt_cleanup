@@ -216,8 +216,27 @@ def load_hash_index(account_email: str):
     return set(data), idx_path
 
 def save_hash_index(hash_set, idx_path):
+    os.makedirs(os.path.dirname(idx_path), exist_ok=True)
     with open(idx_path, "w") as f:
         json.dump(list(hash_set), f)
+
+def save_hash_index_atomic(hash_set, idx_path, lock):
+    """Thread-safe hash index saving"""
+    with lock:
+        # Re-load to merge with any updates from other threads
+        existing_hashes = set()
+        if os.path.exists(idx_path):
+            try:
+                with open(idx_path, "r") as f:
+                    existing_hashes = set(json.load(f))
+            except Exception:
+                pass
+        
+        # Merge and save
+        combined = existing_hashes | hash_set
+        os.makedirs(os.path.dirname(idx_path), exist_ok=True)
+        with open(idx_path, "w") as f:
+            json.dump(list(combined), f)
 
 def load_downloaded_db():
     db = {}
@@ -272,6 +291,9 @@ def select_all_mail(imap):
 
 # ---------- TASK 1: DOWNLOAD ATTACHMENTS ----------
 
+# Global lock for hash index operations
+hash_index_lock = threading.Lock()
+
 def process_new_emails_for_account(account, state, downloaded_db, progress_window=None, failures=None):
     account_email = account["email"]
     imap = None
@@ -324,13 +346,14 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
 
         total_uids = len(uids)
         if progress_window:
-            progress_window.log(f"  Processing {total_uids} messages for {account_email}")
+            progress_window.log(f"Processing {total_uids} messages for {account_email}")
 
         known_hashes, hash_idx_path = load_hash_index(account_email)
         acc_dir = os.path.join(ATTACHMENTS_ROOT, sanitize_part(account_email))
         os.makedirs(acc_dir, exist_ok=True)
 
         attachments_in_account = 0
+        new_hashes = set()  # Track new hashes found in this run
         
         for idx, uid in enumerate(uids, 1):
             uid_str = uid.decode()
@@ -380,11 +403,18 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                 any_attachments = True
                 md5 = hashlib.md5(content).hexdigest()
 
-                if md5 in known_hashes:
-                    logging.info(f"[{account_email}] UID {uid_str} attachment duplicate, skipping")
-                    continue
+                # Thread-safe check: reload hash index to catch concurrent updates
+                with hash_index_lock:
+                    # Reload to get latest from disk (in case another thread added it)
+                    current_hashes, _ = load_hash_index(account_email)
+                    
+                    if md5 in current_hashes or md5 in new_hashes:
+                        logging.info(f"[{account_email}] UID {uid_str} attachment duplicate (hash: {md5[:8]}...), skipping")
+                        continue
+                    
+                    # Mark as new so we don't save it again in this same run
+                    new_hashes.add(md5)
 
-                known_hashes.add(md5)
                 date_prefix = sent_dt.astimezone(timezone.utc).strftime("%Y%m%d_%H%M")
                 base_name = safe_filename(filename or "attachment.bin")
                 final_name = f"{date_prefix}_{base_name}"
@@ -437,7 +467,9 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
             if progress_window:
                 progress_window.increment_messages()
 
-        save_hash_index(known_hashes, hash_idx_path)
+        # Save hash index with thread safety
+        if new_hashes:
+            save_hash_index_atomic(new_hashes, hash_idx_path, hash_index_lock)
         
         if failures:
             record_success(account_email, failures)
