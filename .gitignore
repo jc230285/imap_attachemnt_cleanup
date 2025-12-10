@@ -8,7 +8,7 @@ config.json
 *.csv
 
 # JSON data files
-state.json
+state.json  # Legacy global state file
 failures.json
 
 # Backup files

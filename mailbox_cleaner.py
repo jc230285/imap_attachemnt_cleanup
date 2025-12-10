@@ -27,7 +27,6 @@ except ImportError:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_ATTACHMENTS_ROOT = os.path.join(BASE_DIR, "attachments")  # Fallback if not specified in config
-STATE_FILE = os.path.join(BASE_DIR, "state.json")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 FAILURE_LOG = os.path.join(BASE_DIR, "failures.json")
@@ -365,15 +364,61 @@ def load_config():
     with open(CONFIG_FILE, "r") as f:
         return json.load(f)
 
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {}
-    with open(STATE_FILE, "r") as f:
-        return json.load(f)
+def load_state(accounts):
+    """Load state from all account folders"""
+    state = {}
+    for account in accounts:
+        account_email = account["email"]
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        state_path = get_account_state_path(account_email, attachments_root)
+        
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "r") as f:
+                    account_state = json.load(f)
+                    state[account_email] = account_state
+            except Exception as e:
+                logging.warning(f"Failed to load state for {account_email}: {e}")
+    
+    # Legacy: try to load from old global state.json and migrate
+    old_state_file = os.path.join(BASE_DIR, "state.json")
+    if os.path.exists(old_state_file):
+        try:
+            with open(old_state_file, "r") as f:
+                old_state = json.load(f)
+                for email, data in old_state.items():
+                    if email not in state:  # Only use if no new state exists
+                        state[email] = data
+        except Exception as e:
+            logging.warning(f"Failed to load legacy state: {e}")
+    
+    return state
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+def save_state(state, accounts=None):
+    """Save state to individual account folders"""
+    if accounts is None:
+        accounts = GLOBAL_ACCOUNTS
+    
+    if not accounts:
+        return
+    
+    for account in accounts:
+        account_email = account["email"]
+        if account_email not in state:
+            continue
+        
+        attachments_root = account.get("folder", DEFAULT_ATTACHMENTS_ROOT)
+        acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
+        
+        # Create account directory if needed
+        os.makedirs(acc_dir, exist_ok=True)
+        
+        state_path = get_account_state_path(account_email, attachments_root)
+        try:
+            with open(state_path, "w") as f:
+                json.dump(state[account_email], f, indent=2)
+        except Exception as e:
+            logging.error(f"Failed to save state for {account_email}: {e}")
 
 def load_failures():
     if not os.path.exists(FAILURE_LOG):
@@ -483,6 +528,13 @@ def get_account_csv_path(account_email: str, attachments_root: str = None) -> st
         attachments_root = DEFAULT_ATTACHMENTS_ROOT
     acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
     return os.path.join(acc_dir, "downloaded.csv")
+
+def get_account_state_path(account_email: str, attachments_root: str = None) -> str:
+    """Get the state.json path for a specific account"""
+    if attachments_root is None:
+        attachments_root = DEFAULT_ATTACHMENTS_ROOT
+    acc_dir = os.path.join(attachments_root, sanitize_email_for_folder(account_email))
+    return os.path.join(acc_dir, "state.json")
 
 def load_downloaded_db(accounts):
     """Load downloaded database from all account CSV files"""
@@ -829,7 +881,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
                     if idx > 1:  # Only save if we processed at least one message
                         acc_state["last_processed_uid"] = int(uids[idx-2].decode())
                         state[account_email] = acc_state
-                    save_state(state)
+                    save_state(state, GLOBAL_ACCOUNTS)
                 with db_lock:
                     save_downloaded_db(downloaded_db, GLOBAL_ACCOUNTS)
                 return 'stopped'  # Return special status for graceful stop
@@ -974,7 +1026,7 @@ def process_new_emails_for_account(account, state, downloaded_db, progress_windo
         
         # Save state and DB immediately after processing this account
         with state_lock:
-            save_state(state)
+            save_state(state, GLOBAL_ACCOUNTS)
         with db_lock:
             save_downloaded_db(downloaded_db, GLOBAL_ACCOUNTS)
         save_failures(failures)
@@ -1133,7 +1185,7 @@ def auto_save_timer(state, downloaded_db, failures, stop_event):
         if not stop_event.is_set():
             try:
                 with state_lock:
-                    save_state(state)
+                    save_state(state, GLOBAL_ACCOUNTS)
                 with db_lock:
                     save_downloaded_db(downloaded_db, GLOBAL_ACCOUNTS)
                 save_failures(failures)
@@ -1160,10 +1212,9 @@ def main():
             progress_window.update_progress(0, "Loading configuration...")
             
             config = load_config()
-            state = load_state()
-            failures = load_failures()
-
             accounts = config.get("accounts", [])
+            state = load_state(accounts)
+            failures = load_failures()
             if not accounts:
                 progress_window.log("No accounts configured in config.json", "ERROR")
                 progress_window.update_progress(100, "Error: No accounts configured")
@@ -1262,7 +1313,7 @@ def main():
 
             # Save state and failures after downloads
             progress_window.update_progress(55, "Saving state...")
-            save_state(state)
+            save_state(state, accounts)
             save_downloaded_db(downloaded_db, accounts)
             save_failures(failures)
 
@@ -1290,7 +1341,7 @@ def main():
 
             # Final save
             progress_window.update_progress(95, "Finalizing...")
-            save_state(state)
+            save_state(state, accounts)
             save_downloaded_db(downloaded_db, accounts)
             save_failures(failures)
             
