@@ -111,8 +111,9 @@ class ProgressWindow:
         self.messages_processed = 0
         self.attachments_saved = 0
         
-        # Start runtime updater
+        # Start runtime updaters
         self.update_runtime()
+        self.update_account_runtime()
         
     def create_account_row(self, email):
         """Create a progress row for an account"""
